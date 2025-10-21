@@ -1,5 +1,11 @@
+import hashlib
 import streamlit as st
 from streamlit.errors import StreamlitAPIException
+
+def _make_token(filters: list[str]) -> str:
+    """Small stable token from filters to version widget keys/state."""
+    s = repr(sorted(filters))
+    return hashlib.md5(s.encode()).hexdigest()[:8]
 
 
 class DynamicFilters:
@@ -39,16 +45,39 @@ class DynamicFilters:
                 Name of the filters object in session state.
         """
         self.df = df
-        self.filters_name = filters_name
+        self.base_filters_name = filters_name
+        self.filter_names = list(filters)
+        self.token = _make_token(self.filter_names)
+        self.filters_name = f"{self.base_filters_name}__{self.token}"
         self.filters = {filter_name: [] for filter_name in filters}
         self.check_state()
+
+    def _purge_old_namespaces(self):
+        """Delete previous versions of this namespace to avoid stale collisions."""
+        prefix = f"{self.base_filters_name}__"
+        for k in list(st.session_state.keys()):
+            if isinstance(k, str) and k.startswith(prefix) and k != self.filters_name:
+                del st.session_state[k]
+
+    def _rebuild_namespace_if_mismatch(self):
+        """Ensure stored keys match current filter set (repair on change)."""
+        current = st.session_state.get(self.filters_name, {})
+        if set(current.keys()) != set(self.filter_names):
+            st.session_state[self.filters_name] = {name: current.get(name, []) for name in self.filter_names}
+
+    def _widget_key(self, filter_name: str) -> str:
+        """Versioned widget key so Streamlit creates fresh widgets when filters change."""
+        return f"{self.filters_name}::{filter_name}"
 
     def check_state(self):
         """Initializes the session state with filters if not already set."""
         # if 'filters' not in st.session_state:
         #     st.session_state.filters = self.filters
+        self._purge_old_namespaces()
         if self.filters_name not in st.session_state:
             st.session_state[self.filters_name] = self.filters
+        else:
+            self._rebuild_namespace_if_mismatch()
 
     def reset_filters(self):
         """
@@ -78,7 +107,7 @@ class DynamicFilters:
         """
         filtered_df = self.df.copy()
         for key, values in st.session_state[self.filters_name].items():
-            if key != except_filter and values:
+            if key != except_filter and values and key in filtered_df.columns:  # guard for missing column
                 filtered_df = filtered_df[filtered_df[key].isin(values)]
         return filtered_df
 
@@ -165,6 +194,10 @@ class DynamicFilters:
             col_list = st.columns(num_columns, gap=gap)
 
         for filter_name in st.session_state[self.filters_name].keys():
+            # skip gracefully if df no longer has this column
+            if filter_name not in self.df.columns:
+                continue
+                
             filtered_df = self.filter_df(filter_name)
             options = filtered_df[filter_name].unique().tolist()
 
@@ -184,7 +217,7 @@ class DynamicFilters:
                         f"Select {filter_name}",
                         sorted(options),
                         default=st.session_state[self.filters_name][filter_name],
-                        key=self.filters_name + filter_name,
+                        key=self._widget_key(filter_name),
                     )
             elif location == "columns" and num_columns > 0:
                 with col_list[counter - 1]:
@@ -192,7 +225,7 @@ class DynamicFilters:
                         f"Select {filter_name}",
                         sorted(options),
                         default=st.session_state[self.filters_name][filter_name],
-                        key=self.filters_name + filter_name,
+                        key=self._widget_key(filter_name),
                     )
 
                 # increase counter and reset to 1 if max_value is reached
@@ -205,7 +238,7 @@ class DynamicFilters:
                     f"Select {filter_name}",
                     sorted(options),
                     default=st.session_state[self.filters_name][filter_name],
-                    key=self.filters_name + filter_name,
+                    key=self._widget_key(filter_name),
                 )
 
             if selected != st.session_state[self.filters_name][filter_name]:
@@ -261,7 +294,10 @@ class DynamicFiltersHierarchical(DynamicFilters):
             except_filter_tab = []
         filtered_df = self.df.copy()
         for key, values in st.session_state[self.filters_name].items():
-            if key != except_filter and key not in except_filter_tab and values:
+            if (key != except_filter
+                    and key not in except_filter_tab
+                    and values
+                    and key in filtered_df.columns): 
                 filtered_df = filtered_df[filtered_df[key].isin(values)]
         return filtered_df
 
@@ -349,6 +385,10 @@ class DynamicFiltersHierarchical(DynamicFilters):
 
         hierarchical_filter_name = list(st.session_state[self.filters_name].keys())
         for filter_name in st.session_state[self.filters_name].keys():
+            # skip gracefully if df no longer has this column
+            if filter_name not in self.df.columns:
+                continue
+                
             filtered_df = self.filter_df(except_filter_tab=hierarchical_filter_name)
             hierarchical_filter_name.remove(filter_name)
             options = filtered_df[filter_name].unique().tolist()
@@ -369,7 +409,7 @@ class DynamicFiltersHierarchical(DynamicFilters):
                         f"Select {filter_name}",
                         sorted(options),
                         default=st.session_state[self.filters_name][filter_name],
-                        key=self.filters_name + filter_name,
+                        key=self._widget_key(filter_name),
                     )
             elif location == "columns" and num_columns > 0:
                 with col_list[counter - 1]:
@@ -377,7 +417,7 @@ class DynamicFiltersHierarchical(DynamicFilters):
                         f"Select {filter_name}",
                         sorted(options),
                         default=st.session_state[self.filters_name][filter_name],
-                        key=self.filters_name + filter_name,
+                        key=self._widget_key(filter_name),
                     )
 
                 # increase counter and reset to 1 if max_value is reached
@@ -390,7 +430,7 @@ class DynamicFiltersHierarchical(DynamicFilters):
                     f"Select {filter_name}",
                     sorted(options),
                     default=st.session_state[self.filters_name][filter_name],
-                    key=self.filters_name + filter_name,
+                    key=self._widget_key(filter_name),
                 )
 
             if selected != st.session_state[self.filters_name][filter_name]:
@@ -460,20 +500,52 @@ class DynamicFiltersWithGroupby:
                 Name of the aggregation object in session state.
         """
         self.df = df
-        self.filters_name = filters_name
-        self.aggregation_name = aggregation_name
+        self.base_filters_name = filters_name
+        self.base_aggregation_name = aggregation_name
+        self.filter_names = list(filters)
+        self.token = _make_token(self.filter_names)
+        self.filters_name = f"{self.base_filters_name}__{self.token}"
+        self.aggregation_name = f"{self.base_aggregation_name}__{self.token}"
         self.numerics = numerics
-        self.filters = {filter_name: [] for filter_name in filters}
+        self.filters = {filter_name: [] for filter_name in self.filter_names}
         self.aggregations = {filter_name: False for filter_name in filters}
         self.check_state()
 
+    def _purge_old_namespaces(self):
+        """Delete older versioned namespaces to avoid stale collisions."""
+        for prefix in (f"{self.base_filters_name}__", f"{self.base_aggregation_name}__"):
+            for k in list(st.session_state.keys()):
+                if isinstance(k, str) and k.startswith(prefix) and k not in (self.filters_name, self.aggregation_name):
+                    del st.session_state[k]
+
+    def _rebuild_namespace_if_mismatch(self):
+        """Ensure stored keys match current filter set (repair on change)."""
+        cur_filters = st.session_state.get(self.filters_name, {})
+        if set(cur_filters.keys()) != set(self.filter_names):
+            st.session_state[self.filters_name] = {name: cur_filters.get(name, []) for name in self.filter_names}
+        cur_aggs = st.session_state.get(self.aggregation_name, {})
+        if set(cur_aggs.keys()) != set(self.filter_names):
+            st.session_state[self.aggregation_name] = {name: cur_aggs.get(name, False) for name in self.filter_names}
+
+    def _widget_key(self, filter_name: str) -> str:
+        """Versioned key for multiselect widgets."""
+        return f"{self.filters_name}::{filter_name}"
+
+    def _agg_key(self, filter_name: str) -> str:
+        """Versioned key for aggregation checkboxes."""
+        return f"{self.aggregation_name}::chk::{filter_name}"
+        
     def check_state(self):
         """Initializes the session state with filters and aggregations if not already set."""
+        self._purge_old_namespaces()
+        
         if self.filters_name not in st.session_state:
             st.session_state[self.filters_name] = self.filters
 
         if self.aggregation_name not in st.session_state:
             st.session_state[self.aggregation_name] = self.aggregations
+
+        self._rebuild_namespace_if_mismatch()
 
     def reset_filters(self):
         """
@@ -503,7 +575,7 @@ class DynamicFiltersWithGroupby:
         """
         filtered_df = self.df.copy()
         for key, values in st.session_state[self.filters_name].items():
-            if key != except_filter and values:
+            if key != except_filter and values and key in filtered_df.columns:
                 filtered_df = filtered_df[filtered_df[key].isin(values)]
         return filtered_df
 
@@ -531,6 +603,11 @@ class DynamicFiltersWithGroupby:
 
         aggregation_status = {}
         for filter_name in st.session_state[self.filters_name].keys():
+            # Skip gracefully if df no longer has this column
+            if filter_name not in self.df.columns:
+                aggregation_status[filter_name] = st.session_state[self.aggregation_name].get(filter_name, False)
+                continue
+                
             filtered_df = self.filter_df(filter_name)
             options = filtered_df[filter_name].unique().tolist()
 
@@ -549,7 +626,7 @@ class DynamicFiltersWithGroupby:
                     agg_location, filters_location = st.columns([0.2, 0.8])
                     with agg_location:
                         selected_aggregation = st.checkbox(
-                            label="🔗", label_visibility="visible", key=filter_name
+                            label="🔗", label_visibility="visible", key=self._agg_key(filter_name)
                         )
                         aggregation_status[filter_name] = selected_aggregation
 
@@ -558,7 +635,7 @@ class DynamicFiltersWithGroupby:
                             f"Select {filter_name}",
                             sorted(options),
                             default=st.session_state[self.filters_name][filter_name],
-                            key=self.filters_name + filter_name,
+                            key=self._widget_key(filter_name),
                         )
             if selected != st.session_state[self.filters_name][filter_name]:
                 st.session_state[self.filters_name][filter_name] = selected
@@ -574,16 +651,23 @@ class DynamicFiltersWithGroupby:
     def display_df(self, **kwargs):
         """Renders the filtered dataframe with optional groupby aggregation in the main area."""
         df = self.filter_df()
+        # guard if aggregation_name exists but columns missing; default False
+        aggs = st.session_state.get(self.aggregation_name, {})
         aggregation_columns = [
             column_name
             for column_name in st.session_state[self.aggregation_name].keys()
             if st.session_state[self.aggregation_name][column_name] is True
         ]
         if aggregation_columns and df.shape[0] > 0:
-            df = (
-                df[aggregation_columns + self.numerics]
-                .groupby(aggregation_columns, as_index=False)
-                .sum()
-            )
+            # Only aggregate columns that still exist (safety)
+            group_cols = [c for c in aggregation_columns if c in df.columns]
+            num_cols = [c for c in self.numerics if c in df.columns]
+            if group_cols and num_cols:
+                df = (
+                    df[group_cols + num_cols]
+                    .groupby(group_cols, as_index=False)
+                    .sum()
+                )
         df.index += 1
         st.dataframe(df, **kwargs)
+
